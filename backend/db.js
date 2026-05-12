@@ -1,0 +1,22 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+
+const db = new Database(path.join(__dirname, 'database.sqlite'));
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS election (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    on_chain_id INTEGER NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    image_url TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+module.exports = db;
