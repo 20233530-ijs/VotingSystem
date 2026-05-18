@@ -1,6 +1,6 @@
 const CONFIG = {
   // ⬇ Remix IDE에서 배포 완료 후 반드시 입력
-  CONTRACT_ADDRESS: "0x708EB1bF38585ae93CCce8F7FB9b095235ad1f67",
+  CONTRACT_ADDRESS: "0x1996D4b4a821f0Db8B7917b8C851c9D75a34D9a0",
   CONTRACT_ABI: [
 	{
 		"inputs": [],
