@@ -1,14 +1,25 @@
+// ===== CONSTANTS =====
+const CANDIDATE_COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#06b6d4'];
+const PLACEHOLDER = 'placeholder.png';
+
 // ===== STATE =====
 let contract = null;
 let currentAccount = null;
 let isOwner = false;
 let voteStatus = -1;
+let currentRenderedStatus = -1; // Track rendered status for partial updates
 let candidates = [];
 let pollInterval = null;
 let countdownInterval = null;
 let selectedCandidateId = null;
 let confirmedCandidateId = null;
 let pendingTxHash = null;
+let networkErrorShown = false;
+
+// Chart instances
+let liveChartInstance = null;
+let resultBarInstance = null;
+let resultDonutInstance = null;
 
 // ===== INIT =====
 window.addEventListener('DOMContentLoaded', async () => {
@@ -28,6 +39,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         const chainId = await window.ethereum.request({ method: 'eth_chainId' });
         if (chainId === '0xaa36a7') {
           await updateWalletUI();
+          currentRenderedStatus = -1; // Force re-render with wallet info
           await refreshStatus();
         }
       }
@@ -48,7 +60,7 @@ async function getSignerContract() {
 
 // ===== METAMASK CONNECTION =====
 async function connectWallet() {
-  if (currentAccount) return; // already connected
+  if (currentAccount) return;
 
   if (!window.ethereum) {
     document.getElementById('connectModalDesc').textContent =
@@ -76,6 +88,7 @@ async function doConnectWallet() {
     const ok = await checkNetwork();
     if (!ok) return;
     await updateWalletUI();
+    currentRenderedStatus = -1; // Force re-render with wallet state
     await refreshStatus();
   } catch (err) {
     if (err.code === 4001) {
@@ -104,6 +117,7 @@ async function switchToSepolia() {
     });
     hideModal('modalNetwork');
     await updateWalletUI();
+    currentRenderedStatus = -1;
     await refreshStatus();
   } catch (err) {
     if (err.code === 4902) {
@@ -120,6 +134,7 @@ async function switchToSepolia() {
         });
         hideModal('modalNetwork');
         await updateWalletUI();
+        currentRenderedStatus = -1;
         await refreshStatus();
       } catch (addErr) {
         showToast('Sepolia 네트워크 추가에 실패했습니다.', 'error');
@@ -136,15 +151,14 @@ function setupMetaMaskEvents() {
     if (!accounts || accounts.length === 0) {
       currentAccount = null;
       isOwner = false;
-      await updateWalletUI();
-      await refreshStatus();
     } else {
       currentAccount = accounts[0].toLowerCase();
       const ok = await checkNetwork();
-      if (!ok) return;
-      await updateWalletUI();
-      await refreshStatus();
+      if (!ok) { await updateWalletUI(); return; }
     }
+    await updateWalletUI();
+    currentRenderedStatus = -1; // Force full re-render on account change
+    await refreshStatus();
   });
   window.ethereum.on('chainChanged', () => { window.location.reload(); });
 }
@@ -173,7 +187,7 @@ async function updateWalletUI() {
   }
 }
 
-// ===== DATA =====
+// ===== DATA LOADING =====
 async function loadElectionData() {
   try {
     const res = await fetch(`${CONFIG.BACKEND_URL}/api/election`);
@@ -184,44 +198,72 @@ async function loadElectionData() {
       document.getElementById('electionInfo').classList.remove('hidden');
     }
     candidates = data.candidates || [];
+    networkErrorShown = false;
   } catch (e) {
     showToast('후보자 정보를 불러오지 못했습니다. 새로고침해주세요.', 'error');
     candidates = [];
   }
 }
 
-// ===== POLLING =====
+// ===== POLLING & STATUS =====
 async function refreshStatus() {
   try {
-    const status = Number(await contract.getVoteStatus());
-    voteStatus = status;
-    updateStatusBadge(status);
+    const newStatus = Number(await contract.getVoteStatus());
+    const statusChanged = newStatus !== currentRenderedStatus;
+    voteStatus = newStatus;
+    networkErrorShown = false;
 
-    if (status >= 1) {
+    updateStatusBadge(newStatus);
+
+    if (newStatus >= 1) {
       const [st, et] = await contract.getElectionPeriod();
-      document.getElementById('startTimeDisplay').textContent = formatTimestamp(Number(st));
-      document.getElementById('endTimeDisplay').textContent = formatTimestamp(Number(et));
+      setEl('startTimeDisplay', formatTimestamp(Number(st)));
+      setEl('endTimeDisplay', formatTimestamp(Number(et)));
       document.getElementById('electionInfo').classList.remove('hidden');
     }
 
-    if (status === 2 || status === 3) {
+    if (newStatus === 2 || newStatus === 3) {
       try {
         const total = Number(await contract.getTotalVotes());
-        document.getElementById('totalVotesDisplay').textContent = `총 투표수: ${total}표`;
+        setEl('totalVotesDisplay', `총 투표수: ${total}표`);
       } catch (e) { /* silent */ }
     } else {
-      document.getElementById('totalVotesDisplay').textContent = '';
+      setEl('totalVotesDisplay', '');
     }
 
-    await renderByStatus(status);
+    if (statusChanged) {
+      currentRenderedStatus = newStatus;
+      clearCountdown();
+      destroyAllCharts();
+      await renderByStatus(newStatus);
+    } else if (newStatus === 2) {
+      // Partial update: only refresh chart data
+      await refreshLiveChart();
+    }
+
+    // Stop polling when election ended (final data, no changes)
+    if (newStatus === 3 && pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
   } catch (e) {
     console.error('Status refresh error:', e);
+    if (!networkErrorShown) {
+      networkErrorShown = true;
+      showToast('네트워크 연결을 확인해주세요.', 'error');
+    }
   }
 }
 
 function startPolling() {
   if (pollInterval) clearInterval(pollInterval);
   pollInterval = setInterval(refreshStatus, 30000);
+}
+
+function destroyAllCharts() {
+  if (liveChartInstance)  { liveChartInstance.destroy();  liveChartInstance = null; }
+  if (resultBarInstance)  { resultBarInstance.destroy();  resultBarInstance = null; }
+  if (resultDonutInstance){ resultDonutInstance.destroy(); resultDonutInstance = null; }
 }
 
 // ===== STATUS BADGE =====
@@ -240,14 +282,13 @@ function updateStatusBadge(status) {
 
 // ===== RENDER ROUTER =====
 async function renderByStatus(status) {
-  clearCountdown();
-  if (status === 0) renderNotInitialized();
+  if (status === 0)      renderNotInitialized();
   else if (status === 1) await renderPending();
   else if (status === 2) await renderActive();
   else if (status === 3) await renderEnded();
 }
 
-// ===== SCR states =====
+// ===== SCR: NOT_INITIALIZED =====
 function renderNotInitialized() {
   const adminBtn = isOwner
     ? '<p style="margin-top:20px;"><a href="admin.html" class="btn-primary" style="text-decoration:none;display:inline-block;">관리자 대시보드로 이동</a></p>'
@@ -263,6 +304,7 @@ function renderNotInitialized() {
     </div>`;
 }
 
+// ===== SCR-005: PENDING =====
 async function renderPending() {
   const [st, et] = await contract.getElectionPeriod();
   const startMs = Number(st) * 1000;
@@ -289,6 +331,7 @@ async function renderPending() {
   startCountdown(startMs);
 }
 
+// ===== SCR-006: ACTIVE (LIVE CHART) =====
 async function renderActive() {
   const [, et] = await contract.getElectionPeriod();
   const endMs = Number(et) * 1000;
@@ -304,8 +347,10 @@ async function renderActive() {
 
   const votedCandidate = candidates.find(c => c.onChainId === voterChoiceId);
   const votedBanner = (alreadyVoted && votedCandidate)
-    ? `<div class="voted-banner"><span class="icon">✅</span><span class="text">${votedCandidate.name}에게 투표하셨습니다.</span></div>`
+    ? `<div class="voted-banner"><span class="icon">✅</span><span class="text">${escHtml(votedCandidate.name)}에게 투표하셨습니다.</span></div>`
     : '';
+
+  const chartH = Math.max(200, candidates.length * 72);
 
   document.getElementById('statusContent').innerHTML = `
     <div class="card">
@@ -314,8 +359,8 @@ async function renderActive() {
         <span class="time-remaining" id="activeTimeRemaining"></span>
       </div>
       ${votedBanner}
-      <div id="liveChartArea" style="background:#f8fafc;border-radius:10px;padding:40px 20px;text-align:center;color:#9ca3af;margin-bottom:4px;">
-        📊 실시간 득표 차트 (Phase 3 구현)
+      <div class="live-chart-wrapper" style="height:${chartH}px;">
+        <canvas id="liveChart"></canvas>
       </div>
     </div>
 
@@ -334,21 +379,336 @@ async function renderActive() {
 
   if (!alreadyVoted) renderSelectableCandidates('candidateSelectGrid');
 
+  await initLiveChart(voterChoiceId);
   updateActiveTimeRemaining(endMs);
   startActiveTimer(endMs);
 }
 
+// ===== LIVE CHART =====
+async function initLiveChart(voterChoiceId) {
+  const canvas = document.getElementById('liveChart');
+  if (!canvas || !candidates.length) return;
+
+  let counts = new Array(candidates.length).fill(0);
+  try {
+    const raw = await contract.getAllVoteCounts();
+    counts = raw.map(Number);
+  } catch (e) { /* use zeros */ }
+
+  const labels = candidates.map(c =>
+    c.name + (voterChoiceId && c.onChainId === voterChoiceId ? ' ✓' : ''));
+  const colors = getCandidateColors(voterChoiceId);
+
+  liveChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: counts, backgroundColor: colors, borderRadius: 6 }] },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 600 },
+      layout: { padding: { right: 100 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const val = ctx.parsed.x;
+              const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+              const pct = total > 0 ? ((val / total) * 100).toFixed(1) : '0.0';
+              return `${val}표 (${pct}%)`;
+            }
+          }
+        },
+        datalabels: {
+          anchor: 'end',
+          align: 'right',
+          clamp: false,
+          display: (ctx) => ctx.dataset.data[ctx.dataIndex] > 0,
+          formatter: (value, ctx) => {
+            const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+            const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
+            return `${value}표 (${pct}%)`;
+          },
+          color: '#374151',
+          font: { size: 11, weight: '600' },
+        }
+      },
+      scales: {
+        x: { beginAtZero: true, grid: { color: '#f3f4f6' }, ticks: { stepSize: 1 } },
+        y: { grid: { display: false } }
+      }
+    },
+    plugins: [ChartDataLabels]
+  });
+}
+
+async function refreshLiveChart() {
+  if (!liveChartInstance) return;
+  try {
+    const raw = await contract.getAllVoteCounts();
+    const counts = raw.map(Number);
+
+    let voterChoiceId = 0;
+    if (currentAccount) {
+      try {
+        const voted = await contract.hasVotedAddress(currentAccount);
+        if (voted) voterChoiceId = Number(await contract.getVoterChoice(currentAccount));
+      } catch (e) { /* silent */ }
+    }
+
+    liveChartInstance.data.datasets[0].data = counts;
+    liveChartInstance.data.datasets[0].backgroundColor = getCandidateColors(voterChoiceId);
+    liveChartInstance.data.labels = candidates.map(c =>
+      c.name + (voterChoiceId && c.onChainId === voterChoiceId ? ' ✓' : ''));
+    liveChartInstance.update('active');
+
+    const total = counts.reduce((a, b) => a + b, 0);
+    setEl('totalVotesDisplay', `총 투표수: ${total}표`);
+  } catch (e) {
+    console.error('Live chart refresh error:', e);
+  }
+}
+
+function getCandidateColors(voterChoiceId) {
+  return candidates.map((c, i) =>
+    (voterChoiceId && c.onChainId === voterChoiceId)
+      ? '#f59e0b'
+      : CANDIDATE_COLORS[i % CANDIDATE_COLORS.length]);
+}
+
+// ===== SCR-010: ENDED (FINAL RESULTS) =====
 async function renderEnded() {
+  let counts = [];
+  let totalVotes = 0;
+  let st = 0, et = 0;
+
+  try {
+    const raw = await contract.getAllVoteCounts();
+    counts = raw.map(Number);
+    totalVotes = counts.reduce((a, b) => a + b, 0);
+    const period = await contract.getElectionPeriod();
+    st = Number(period[0]);
+    et = Number(period[1]);
+  } catch (e) {
+    showToast('결과를 불러오지 못했습니다.', 'error');
+    counts = new Array(candidates.length).fill(0);
+  }
+
+  // Reload election title if needed
+  try {
+    const res = await fetch(`${CONFIG.BACKEND_URL}/api/election`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.title) setEl('electionTitle', data.title);
+    }
+  } catch(e) { /* silent */ }
+
+  const rankedData = calculateRanks(candidates, counts);
+  const contractShort = CONFIG.CONTRACT_ADDRESS.slice(0, 6) + '...' + CONFIG.CONTRACT_ADDRESS.slice(-4);
+  const barH = Math.max(220, rankedData.length * 72);
+
+  let electionInfoHtml = '';
+  if (st > 0) {
+    electionInfoHtml = `<p class="result-subtitle">투표 기간: ${formatTimestamp(st)} ~ ${formatTimestamp(et)}</p>`;
+  }
+
   document.getElementById('statusContent').innerHTML = `
     <div class="card">
-      <h2 style="text-align:center;border:none;font-size:1.3rem;">🏆 최종 투표 결과</h2>
-      <div id="endedBarChartArea" style="background:#f8fafc;border-radius:10px;padding:40px 20px;text-align:center;color:#9ca3af;margin:16px 0;">
-        📊 최종 결과 차트 (Phase 3 구현)
+      <div class="result-header">
+        <h2 class="result-title">🏆 최종 투표 결과</h2>
+        ${electionInfoHtml}
+        <p class="result-total">총 투표수: <strong>${totalVotes}표</strong></p>
       </div>
-      <div class="candidates-grid" id="endedCandidateGrid"></div>
+
+      ${totalVotes === 0 ? `<div class="no-votes-msg">투표 참여자가 없습니다.</div>` : `
+      <div class="result-bar-container" style="height:${barH}px;">
+        <canvas id="resultBarChart"></canvas>
+      </div>
+
+      <div class="rank-donut-row">
+        <div class="rank-cards-wrapper" id="rankCardsContainer"></div>
+        <div class="result-donut-container">
+          <canvas id="resultDonutChart"></canvas>
+        </div>
+      </div>
+      `}
+
+      <div class="result-footer">
+        컨트랙트:&nbsp;
+        <a href="https://sepolia.etherscan.io/address/${CONFIG.CONTRACT_ADDRESS}" target="_blank">
+          ${contractShort} ↗ Etherscan
+        </a>
+      </div>
     </div>`;
 
-  await renderFinalResults();
+  if (totalVotes > 0) {
+    renderRankCards(rankedData, totalVotes);
+    await initResultCharts(rankedData, totalVotes);
+    // Trigger countup after charts are initialized
+    setTimeout(() => {
+      document.querySelectorAll('.count-up').forEach(el => {
+        const target = parseInt(el.dataset.target || '0', 10);
+        animateCountUp(el, target);
+      });
+    }, 200);
+  }
+}
+
+function calculateRanks(cands, counts) {
+  const data = cands.map((c, i) => ({
+    onChainId: c.onChainId,
+    name: c.name,
+    imageUrl: c.imageUrl,
+    count: counts[i] || 0,
+    colorIndex: i,
+  }));
+  data.sort((a, b) => b.count - a.count);
+
+  for (let i = 0; i < data.length; i++) {
+    if (i === 0) {
+      data[i].rank = 1;
+    } else if (data[i].count === data[i - 1].count) {
+      data[i].rank = data[i - 1].rank;
+    } else {
+      data[i].rank = i + 1;
+    }
+  }
+  return data;
+}
+
+function renderRankCards(rankedData, totalVotes) {
+  const container = document.getElementById('rankCardsContainer');
+  if (!container) return;
+
+  // Group consecutive same-rank items
+  const groups = [];
+  rankedData.forEach(c => {
+    const last = groups[groups.length - 1];
+    if (last && last[0].rank === c.rank) last.push(c);
+    else groups.push([c]);
+  });
+
+  const medals = { 1: '🥇', 2: '🥈', 3: '🥉' };
+  container.innerHTML = groups.map(group => {
+    const rank = group[0].rank;
+    const isTie = group.length > 1;
+    const isWinner = rank === 1;
+    const medal = medals[rank] || rank + '위';
+    const rankClass = rank <= 3 ? 'rank-' + rank : 'rank-other';
+    const imgSize = rank === 1 ? 'rank-img-large' : 'rank-img-medium';
+
+    return group.map(c => {
+      const pct = totalVotes > 0 ? ((c.count / totalVotes) * 100).toFixed(1) : '0.0';
+      const electedBadge = isWinner
+        ? `<div class="rank-elected">${isTie ? '★ 공동 당선' : '★ 당선'}</div>`
+        : '';
+      return `
+        <div class="rank-card ${rankClass}">
+          <div class="rank-badge-label">${medal}</div>
+          <img class="rank-img ${imgSize}" src="${escHtml(c.imageUrl || PLACEHOLDER)}" alt="${escHtml(c.name)}"
+               onerror="this.src='${PLACEHOLDER}';this.onerror=null;">
+          <div class="rank-info">
+            <div class="rank-name">${escHtml(c.name)} ${isTie ? '<small>(공동)</small>' : ''}</div>
+            <div class="rank-votes count-up" data-target="${c.count}">0표</div>
+            <div class="rank-pct">(${pct}%)</div>
+            ${electedBadge}
+          </div>
+        </div>`;
+    }).join('');
+  }).join('');
+}
+
+async function initResultCharts(rankedData, totalVotes) {
+  // Bar chart uses rankedData sorted by votes (already sorted)
+  const labels = rankedData.map(c => c.name);
+  const data   = rankedData.map(c => c.count);
+  const colors = rankedData.map(c => CANDIDATE_COLORS[c.colorIndex % CANDIDATE_COLORS.length]);
+  const pcts   = rankedData.map(c =>
+    totalVotes > 0 ? ((c.count / totalVotes) * 100).toFixed(1) : '0.0');
+
+  // ── Bar chart ──
+  const barCanvas = document.getElementById('resultBarChart');
+  if (barCanvas) {
+    resultBarInstance = new Chart(barCanvas.getContext('2d'), {
+      type: 'bar',
+      data: { labels, datasets: [{ data, backgroundColor: colors, borderRadius: 6 }] },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 1000 },
+        layout: { padding: { right: 110 } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end',
+            align: 'right',
+            clamp: false,
+            display: (ctx) => ctx.dataset.data[ctx.dataIndex] > 0,
+            formatter: (value, ctx) => `${value}표 (${pcts[ctx.dataIndex]}%)`,
+            color: '#374151',
+            font: { size: 12, weight: '600' },
+          }
+        },
+        scales: {
+          x: { beginAtZero: true, grid: { color: '#f3f4f6' } },
+          y: { grid: { display: false } }
+        }
+      },
+      plugins: [ChartDataLabels]
+    });
+  }
+
+  // ── Donut chart ──
+  const donutCanvas = document.getElementById('resultDonutChart');
+  if (donutCanvas) {
+    resultDonutInstance = new Chart(donutCanvas.getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{
+          data,
+          backgroundColor: colors,
+          borderWidth: 2,
+          borderColor: '#fff',
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { font: { size: 12 }, padding: 16 } },
+          datalabels: {
+            display: (ctx) => ctx.dataset.data[ctx.dataIndex] > 0,
+            formatter: (value, ctx) => {
+              const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+              return total > 0 ? ((value / total) * 100).toFixed(1) + '%' : '';
+            },
+            color: 'white',
+            font: { weight: 'bold', size: 12 },
+          }
+        }
+      },
+      plugins: [ChartDataLabels]
+    });
+  }
+}
+
+// ===== COUNTUP ANIMATION =====
+function animateCountUp(el, target, duration) {
+  duration = duration || 1500;
+  if (target === 0) { el.textContent = '0표'; return; }
+  const start = performance.now();
+  function step(ts) {
+    const elapsed = ts - start;
+    const progress = Math.min(elapsed / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+    el.textContent = Math.floor(eased * target).toLocaleString() + '표';
+    if (progress < 1) requestAnimationFrame(step);
+    else el.textContent = target.toLocaleString() + '표';
+  }
+  requestAnimationFrame(step);
 }
 
 // ===== CANDIDATE RENDERING =====
@@ -362,7 +722,8 @@ function renderCandidateCards(containerId) {
   grid.innerHTML = candidates.map(c => `
     <div class="candidate-card">
       <div class="candidate-number">기호 ${c.onChainId}번</div>
-      <img class="candidate-img" src="${escHtml(c.imageUrl || '')}" alt="${escHtml(c.name)}">
+      <img class="candidate-img" src="${escHtml(c.imageUrl || PLACEHOLDER)}" alt="${escHtml(c.name)}"
+           onerror="this.src='${PLACEHOLDER}';this.onerror=null;">
       <div class="candidate-name">${escHtml(c.name)}</div>
     </div>`).join('');
 }
@@ -378,35 +739,13 @@ function renderSelectableCandidates(containerId) {
     <div class="candidate-card clickable" id="ccard-${c.onChainId}"
          onclick="selectCandidate(${c.onChainId})">
       <div class="candidate-number">기호 ${c.onChainId}번</div>
-      <img class="candidate-img" src="${escHtml(c.imageUrl || '')}" alt="${escHtml(c.name)}">
+      <img class="candidate-img" src="${escHtml(c.imageUrl || PLACEHOLDER)}" alt="${escHtml(c.name)}"
+           onerror="this.src='${PLACEHOLDER}';this.onerror=null;">
       <div class="candidate-name">${escHtml(c.name)}</div>
     </div>`).join('');
 }
 
-async function renderFinalResults() {
-  const grid = document.getElementById('endedCandidateGrid');
-  if (!grid) return;
-  if (!candidates.length) { grid.innerHTML = '<p style="color:#9ca3af;text-align:center;">후보자 정보가 없습니다.</p>'; return; }
-  try {
-    const counts = await contract.getAllVoteCounts();
-    const totalVotes = counts.reduce((s, c) => s + Number(c), 0);
-    grid.innerHTML = candidates.map((c, i) => {
-      const count = Number(counts[i] || 0);
-      const pct = totalVotes > 0 ? ((count / totalVotes) * 100).toFixed(1) : '0.0';
-      return `
-        <div class="candidate-card">
-          <div class="candidate-number">기호 ${c.onChainId}번</div>
-          <img class="candidate-img" src="${escHtml(c.imageUrl || '')}" alt="${escHtml(c.name)}">
-          <div class="candidate-name">${escHtml(c.name)}</div>
-          <div class="candidate-vote-count">${count}표 (${pct}%)</div>
-        </div>`;
-    }).join('');
-  } catch (e) {
-    grid.innerHTML = '<p style="color:#9ca3af;text-align:center;">득표수를 불러올 수 없습니다.</p>';
-  }
-}
-
-// ===== CANDIDATE SELECTION =====
+// ===== SELECTION =====
 function selectCandidate(id) {
   selectedCandidateId = id;
   document.querySelectorAll('.candidate-card.clickable').forEach(card => {
@@ -437,14 +776,15 @@ function showConfirmModal() {
   if (!candidate) return;
 
   const img = document.getElementById('confirmCandidateImg');
-  img.src = candidate.imageUrl || '';
-  img.style.display = candidate.imageUrl ? 'block' : 'none';
+  img.src = candidate.imageUrl || PLACEHOLDER;
+  img.setAttribute('onerror', `this.src='${PLACEHOLDER}';this.onerror=null;`);
+  img.style.display = 'block';
   document.getElementById('confirmCandidateName').textContent = candidate.name;
   confirmedCandidateId = selectedCandidateId;
   showModal('modalConfirm');
 }
 
-// ===== VOTE SUBMISSION (SCR-008 → SCR-009) =====
+// ===== VOTE SUBMISSION (SCR-008) =====
 async function submitVote() {
   hideModal('modalConfirm');
   resetTxModal();
@@ -465,9 +805,8 @@ async function submitVote() {
 
     hideModal('modalTx');
     const candidate = candidates.find(c => c.onChainId === confirmedCandidateId);
-    showVoteComplete(receipt, candidate);
     selectedCandidateId = null;
-    await loadElectionData();
+    showVoteComplete(receipt, candidate);
   } catch (err) {
     handleVoteError(err);
   }
@@ -486,28 +825,43 @@ function setTxStep(step, state) {
 
 function updateTxHash(hash) {
   pendingTxHash = hash;
-  const row = document.getElementById('txHashRow');
-  row.classList.remove('hidden');
+  document.getElementById('txHashRow').classList.remove('hidden');
   document.getElementById('txHashDisplay').textContent = hash.slice(0, 10) + '...' + hash.slice(-8);
   document.getElementById('txEtherscanLink').href = 'https://sepolia.etherscan.io/tx/' + hash;
 }
 
+// ===== ERROR HANDLING (9 cases) =====
 function handleVoteError(err) {
   document.getElementById('txSpinner').style.display = 'none';
   const errEl = document.getElementById('txError');
   errEl.classList.remove('hidden');
   document.getElementById('txRetryContainer').classList.remove('hidden');
 
+  const msg = err.message || '';
+  const reason = err.reason || '';
+
   if (err.code === 4001 || err.code === 'ACTION_REJECTED') {
+    // Case 5: 트랜잭션 거부
     errEl.textContent = 'MetaMask에서 트랜잭션을 거부했습니다.';
-  } else if (err.message && err.message.includes('Already voted')) {
+  } else if (msg.includes('Already voted') || reason.includes('Already voted')) {
+    // Case 3: 이미 투표 완료
     errEl.textContent = '이 지갑 주소로 이미 투표하셨습니다.';
-  } else if (err.message && err.message.includes('insufficient funds')) {
-    errEl.textContent = 'Sepolia ETH가 부족합니다. 파우셋에서 충전 후 시도해주세요.';
-  } else if (err.message && err.message.includes('Election is not active')) {
+  } else if (msg.includes('Election is not active') || reason.includes('Election is not active')) {
+    // Case 4: 투표 기간 아님
     errEl.textContent = '현재 투표 기간이 아닙니다.';
+  } else if (msg.includes('insufficient funds') || msg.includes('INSUFFICIENT_FUNDS')) {
+    // Case 6: Sepolia ETH 부족
+    errEl.textContent = 'Sepolia ETH가 부족합니다. 파우셋에서 충전 후 시도해주세요.';
+  } else if (msg.includes('Invalid candidate') || reason.includes('Invalid candidate')) {
+    errEl.textContent = '유효하지 않은 후보자입니다.';
+  } else if (msg.includes('network') || msg.includes('fetch') || msg.includes('timeout')) {
+    // Case 8: 네트워크 오류
+    errEl.textContent = '네트워크 연결을 확인해주세요.';
+  } else if (reason) {
+    // Case 9: 컨트랙트 revert → 파싱
+    errEl.textContent = '컨트랙트 오류: ' + reason;
   } else {
-    errEl.textContent = '오류: ' + (err.reason || err.message || '알 수 없는 오류가 발생했습니다.');
+    errEl.textContent = '오류: ' + (msg || '알 수 없는 오류가 발생했습니다.');
   }
 }
 
@@ -533,6 +887,10 @@ function copyTxHash() {
 
 // ===== VOTE COMPLETE (SCR-009) =====
 function showVoteComplete(receipt, candidate) {
+  // Reset rendered status so next refreshStatus() does full re-render
+  currentRenderedStatus = -1;
+  liveChartInstance = null;
+
   const txHash = receipt.hash || '';
   const blockNum = receipt.blockNumber || '';
   document.getElementById('statusContent').innerHTML = `
@@ -615,14 +973,16 @@ function clearCountdown() {
 // ===== UTILS =====
 function formatTimestamp(ts) {
   const d = new Date(ts * 1000);
-  return d.toLocaleDateString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit' }) + ' ' +
-         d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit' })
+    + ' ' + d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
 }
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function setEl(id, val) { const e = document.getElementById(id); if (e) e.textContent = val; }
 function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function updateEtherscanLink() {
