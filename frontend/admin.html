@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>관리자 대시보드 - 블록체인 투표 시스템</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6/dist/ethers.umd.min.js"></script>
+  <script src="config.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <span class="logo">🗳 블록체인 투표 시스템</span>
+  </div>
+  <div class="header-right">
+    <span id="ownerAddressDisplay" style="font-size:0.85rem;color:#9ca3af;"></span>
+  </div>
+</header>
+
+<main>
+  <div class="admin-header">
+    <a href="index.html" class="btn-secondary">← 홈</a>
+    <h1>관리자 대시보드</h1>
+  </div>
+
+  <!-- Not owner / not connected -->
+  <div id="notOwnerWarning" class="card">
+    <div style="text-align:center;padding:40px 20px;">
+      <div style="font-size:3rem;margin-bottom:16px;">🔒</div>
+      <h2 style="font-size:1.2rem;color:#374151;border:none;margin-bottom:8px;">Owner 지갑이 필요합니다</h2>
+      <p style="color:#6b7280;margin-bottom:20px;">관리자 대시보드는 스마트 컨트랙트 Owner 지갑 주소로만 접근할 수 있습니다.</p>
+      <button class="btn-primary" onclick="connectAdminWallet(false)">MetaMask 연결</button>
+    </div>
+  </div>
+
+  <div id="adminContent" class="hidden">
+
+    <!-- API Key -->
+    <div class="admin-section">
+      <h2>🔑 관리자 API 인증</h2>
+      <div class="form-group">
+        <label>서버 API Key *</label>
+        <input type="password" id="apiKeyInput" placeholder="백엔드 .env의 ADMIN_API_KEY 입력">
+        <p class="form-hint">ℹ 키는 메모리에만 유지됩니다 (페이지 새로고침 시 재입력 필요)</p>
+      </div>
+      <button class="btn-primary" onclick="verifyApiKey()">인증 확인</button>
+      <div id="authStatus" class="auth-status"></div>
+    </div>
+
+    <!-- Election Setup -->
+    <div class="admin-section">
+      <h2>📋 투표 설정</h2>
+      <div class="form-group">
+        <label>투표 제목 * <small style="color:#9ca3af;font-weight:normal;">(서버 저장)</small></label>
+        <input type="text" id="electionTitle" placeholder="예: 2026년 학생회장 선거">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>시작 일시 * <small style="color:#9ca3af;font-weight:normal;">(온체인)</small></label>
+          <input type="datetime-local" id="startTime">
+        </div>
+        <div class="form-group">
+          <label>종료 일시 * <small style="color:#9ca3af;font-weight:normal;">(온체인)</small></label>
+          <input type="datetime-local" id="endTime">
+        </div>
+      </div>
+      <p class="form-hint">ℹ 시작·종료 시간은 MetaMask 트랜잭션이 필요합니다.</p>
+      <div id="candidateCountForElection" class="min-candidates-hint warn" style="margin-top:12px;"></div>
+      <div style="margin-top:16px;">
+        <button class="btn-primary" id="saveElectionBtn" onclick="saveElection()">투표 설정 저장</button>
+      </div>
+      <div id="electionSetMessage" style="margin-top:12px;font-size:0.88rem;"></div>
+    </div>
+
+    <!-- Candidate Registration -->
+    <div class="admin-section">
+      <h2>👤 후보자 등록</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>후보자 이름 *</label>
+          <input type="text" id="candidateName" placeholder="예: 홍길동">
+        </div>
+        <div class="form-group">
+          <label>사진 URL *</label>
+          <input type="text" id="candidateImageUrl" placeholder="https://example.com/photo.jpg" oninput="previewImage()">
+        </div>
+      </div>
+      <img id="imagePreview" class="image-preview" src="" alt="미리보기" style="display:none;">
+      <p class="form-hint">ℹ 후보자 추가 시 MetaMask 트랜잭션이 발생합니다. 가스비가 소요됩니다.</p>
+      <div style="margin-top:16px;">
+        <button class="btn-primary" id="addCandidateBtn" onclick="addCandidate()">후보자 추가</button>
+      </div>
+      <div id="candidateAddMessage" style="margin-top:12px;font-size:0.88rem;"></div>
+
+      <!-- Registered candidates list -->
+      <div class="candidates-list">
+        <div class="candidates-list-title">
+          등록된 후보자
+          <span id="candidatesCountBadge" class="candidates-count-badge warn">0명</span>
+        </div>
+        <div id="candidatesList">
+          <p style="color:#9ca3af;font-size:0.9rem;padding:8px 0;">등록된 후보자가 없습니다.</p>
+        </div>
+        <div id="minCandidatesHint" class="min-candidates-hint warn" style="margin-top:8px;">
+          ℹ 후보자를 최소 2명 이상 등록해야 투표 기간을 설정할 수 있습니다.
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /adminContent -->
+</main>
+
+<!-- Admin TX Modal -->
+<div id="adminModalTx" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="adminTxTitle">처리 중</span>
+    </div>
+    <div class="modal-body">
+      <div class="spinner" id="adminTxSpinner"></div>
+      <div class="tx-steps">
+        <div class="tx-step" id="adminTxStep1">
+          <span class="tx-step-icon">○</span>
+          <span>[1단계] MetaMask에서 트랜잭션을 승인해주세요.</span>
+        </div>
+        <div class="tx-step" id="adminTxStep2">
+          <span class="tx-step-icon">○</span>
+          <span>[2단계] 트랜잭션이 제출되었습니다.</span>
+        </div>
+        <div class="tx-step" id="adminTxStep3">
+          <span class="tx-step-icon">○</span>
+          <span>[3단계] 블록 확인 완료.</span>
+        </div>
+      </div>
+      <div id="adminTxHashRow" class="tx-hash-row hidden">
+        TX:&nbsp;<span id="adminTxHashDisplay"></span>
+        <a id="adminTxEtherscanLink" href="#" target="_blank">↗ Etherscan</a>
+      </div>
+      <div id="adminTxError" class="tx-error hidden"></div>
+      <div id="adminTxRetry" class="hidden" style="text-align:center;margin-top:14px;">
+        <button class="btn-secondary" onclick="hideModal('adminModalTx')">닫기</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script src="admin.js"></script>
+</body>
+</html>

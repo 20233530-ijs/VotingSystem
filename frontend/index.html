@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>블록체인 투표 시스템</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6/dist/ethers.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <span class="logo">🗳 블록체인 투표 시스템</span>
+  </div>
+  <div class="header-right">
+    <a id="adminLink" href="admin.html" class="admin-link hidden">관리자</a>
+    <button id="connectWalletBtn" class="btn-primary" onclick="connectWallet()">지갑 연결</button>
+  </div>
+</header>
+
+<main>
+  <div id="electionInfo" class="election-info hidden">
+    <h1 id="electionTitle">투표</h1>
+    <div class="election-meta">
+      <div class="time-box">
+        <span>시작</span>
+        <span id="startTimeDisplay">-</span>
+      </div>
+      <div class="time-box">
+        <span>종료</span>
+        <span id="endTimeDisplay">-</span>
+      </div>
+    </div>
+    <div class="status-row">
+      <span id="statusBadge" class="badge">-</span>
+      <span id="totalVotesDisplay" class="total-votes"></span>
+    </div>
+  </div>
+
+  <div id="statusContent">
+    <div class="loading"><div class="spinner"></div>불러오는 중...</div>
+  </div>
+</main>
+
+<footer>
+  <div>컨트랙트:&nbsp;<a id="etherscanLink" href="#" target="_blank">-</a></div>
+</footer>
+
+<!-- Modal: MetaMask Connect (SCR-002) -->
+<div id="modalConnect" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">지갑 연결</span>
+      <button class="modal-close" onclick="hideModal('modalConnect')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="metamask-icon">🦊</div>
+      <p class="modal-desc" id="connectModalDesc">투표에 참여하려면 MetaMask 지갑 연결이 필요합니다.</p>
+      <div id="connectModalActions">
+        <button class="btn-primary" style="width:100%;" onclick="doConnectWallet()">MetaMask로 연결하기</button>
+        <div class="install-link">
+          <a href="https://metamask.io/download/" target="_blank">MetaMask가 없으신가요? 공식 사이트에서 설치하기 ↗</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Network Error (SCR-003) -->
+<div id="modalNetwork" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">⚠ 네트워크 불일치</span>
+    </div>
+    <div class="modal-body">
+      <div class="network-warning">이 서비스는 Ethereum <strong>Sepolia 테스트넷</strong> 전용입니다.</div>
+      <p class="modal-desc">현재 다른 네트워크에 연결되어 있습니다.<br>Sepolia로 전환하면 계속 이용할 수 있습니다.</p>
+    </div>
+    <div class="modal-footer" style="justify-content:center;">
+      <button class="btn-primary btn-lg" onclick="switchToSepolia()">Sepolia로 자동 전환</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Vote Confirm (SCR-007) -->
+<div id="modalConfirm" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">투표 최종 확인</span>
+      <button class="modal-close" id="confirmCloseBtn" onclick="hideModal('modalConfirm')">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:#6b7280;font-size:0.9rem;margin-bottom:12px;">선택하신 후보자:</p>
+      <div class="confirm-candidate">
+        <img id="confirmCandidateImg" src="" alt="" onerror="this.style.display='none'">
+        <div class="name" id="confirmCandidateName"></div>
+      </div>
+      <div class="warning-box">
+        ⚠ 주의: 제출된 투표는 블록체인에 영구 기록되며 변경·취소가 불가능합니다.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="hideModal('modalConfirm')">취소</button>
+      <button class="btn-danger" id="submitVoteBtn" onclick="submitVote()">투표 제출</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: TX Progress (SCR-008) -->
+<div id="modalTx" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">투표 처리 중</span>
+    </div>
+    <div class="modal-body">
+      <div class="spinner" id="txSpinner"></div>
+      <div class="tx-steps">
+        <div class="tx-step" id="txStep1">
+          <span class="tx-step-icon">○</span>
+          <span>[1단계] MetaMask에서 트랜잭션을 승인해주세요.</span>
+        </div>
+        <div class="tx-step" id="txStep2">
+          <span class="tx-step-icon">○</span>
+          <span>[2단계] 트랜잭션이 제출되었습니다.</span>
+        </div>
+        <div class="tx-step" id="txStep3">
+          <span class="tx-step-icon">○</span>
+          <span>[3단계] 블록 확인 대기 중... (평균 15~30초)</span>
+        </div>
+      </div>
+      <div id="txHashRow" class="tx-hash-row hidden">
+        TX:&nbsp;<span id="txHashDisplay"></span>
+        <button class="copy-btn" onclick="copyTxHash()">복사</button>
+        <a id="txEtherscanLink" href="#" target="_blank">↗ Etherscan</a>
+      </div>
+      <p class="tx-notice">예상 소요 시간: 15~30초</p>
+      <div id="txError" class="tx-error hidden"></div>
+      <div id="txRetryContainer" class="hidden" style="text-align:center;margin-top:14px;">
+        <button class="btn-secondary" onclick="closeTxAndReset()">닫기</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
