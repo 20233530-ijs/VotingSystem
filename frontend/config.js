@@ -281,5 +281,5 @@ const CONFIG = {
   BACKEND_URL: "http://localhost:3000",
 
   // MetaMask 비연결 상태에서 컨트랙트 읽기 전용 RPC
-  SEPOLIA_RPC: "https://rpc.sepolia.org"
+  SEPOLIA_RPC: "https://ethereum-sepolia-rpc.publicnode.com"
 };

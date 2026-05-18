@@ -52,6 +52,14 @@ function initReadContract() {
   contract = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, CONFIG.CONTRACT_ABI, rpc);
 }
 
+// MetaMask 연결 시 BrowserProvider 우선, 미연결 시 fallback RPC 사용
+function rebuildContract() {
+  const provider = (currentAccount && window.ethereum)
+    ? new ethers.BrowserProvider(window.ethereum)
+    : new ethers.JsonRpcProvider(CONFIG.SEPOLIA_RPC);
+  contract = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, CONFIG.CONTRACT_ABI, provider);
+}
+
 async function getSignerContract() {
   const provider = new ethers.BrowserProvider(window.ethereum);
   const signer = await provider.getSigner();
@@ -164,6 +172,7 @@ function setupMetaMaskEvents() {
 }
 
 async function updateWalletUI() {
+  rebuildContract(); // 지갑 상태가 바뀔 때마다 provider 교체
   const btn = document.getElementById('connectWalletBtn');
   const adminLink = document.getElementById('adminLink');
 
