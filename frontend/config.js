@@ -277,8 +277,8 @@ const CONFIG = {
 	}
   ],
 
-  // 백엔드 서버 주소 (로컬 실행 시 그대로 사용)
-  BACKEND_URL: "http://localhost:3000",
+  // 빈 문자열 = 상대 경로 사용 (Cloudflare Pages / wrangler pages dev 공용)
+  BACKEND_URL: "",
 
   // MetaMask 비연결 상태에서 컨트랙트 읽기 전용 RPC
   SEPOLIA_RPC: "https://ethereum-sepolia-rpc.publicnode.com"

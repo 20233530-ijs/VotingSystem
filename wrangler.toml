@@ -1,0 +1,8 @@
+name = "voting-system"
+pages_build_output_dir = "frontend"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "voting-db"
+database_id = "a3fcab8a-a8cb-4fc8-91f4-8875ad07fd87"
