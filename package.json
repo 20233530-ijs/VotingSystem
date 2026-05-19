@@ -6,6 +6,6 @@
     "dev": "wrangler pages dev frontend/",
     "db:init:local": "wrangler d1 execute voting-db --local --file=schema.sql",
     "db:init": "wrangler d1 execute voting-db --file=schema.sql",
-    "deploy": "wrangler pages deploy frontend/ --project-name=voting-system"
+    "deploy": "wrangler pages deploy frontend/ --project-name=voting-system --commit-message=deploy"
   }
 }
